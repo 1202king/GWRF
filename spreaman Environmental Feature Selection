@@ -1,0 +1,91 @@
+import pandas as pd
+import seaborn as sns
+import matplotlib.pyplot as plt
+import numpy as np
+from scipy.stats import spearmanr
+
+# 文件路径
+file_path = r'D:\不爱学习。\2025\6月\spearman相关性分析\train_data.xlsx'
+
+# 读取数据
+data = pd.read_excel(file_path)
+
+# ========== 计算 Spearman 相关系数与 p 值 ==========
+corr_matrix = pd.DataFrame(index=data.columns, columns=data.columns, dtype=float)
+p_matrix = pd.DataFrame(index=data.columns, columns=data.columns, dtype=float)
+
+for col1 in data.columns:
+    for col2 in data.columns:
+        r, p = spearmanr(data[col1], data[col2])
+        corr_matrix.loc[col1, col2] = r
+        p_matrix.loc[col1, col2] = p
+
+# ========== 转换 p 值为显著性符号 ==========
+def significance_marker(p):
+    if p < 0.001:
+        return '***'
+    elif p < 0.01:
+        return '**'
+    elif p < 0.05:
+        return '*'
+    else:
+        return ''
+
+annot = corr_matrix.round(2).astype(str)  # 保留两位小数
+for i in range(len(corr_matrix)):
+    for j in range(len(corr_matrix)):
+        annot.iloc[i, j] = annot.iloc[i, j] + significance_marker(p_matrix.iloc[i, j])
+
+# ========== 生成下三角 mask（保留上三角） ==========
+mask = np.tril(np.ones_like(corr_matrix, dtype=bool))
+
+# ========== 绘制热力图 ==========
+plt.figure(figsize=(14, 12))
+cmap = sns.diverging_palette(220, 10, as_cmap=True)
+
+ax = sns.heatmap(
+    corr_matrix.astype(float),
+    mask=mask,
+    cmap=cmap,
+    center=0,
+    annot=annot,
+    fmt='',
+    square=True,
+    cbar_kws={'shrink': .8},
+    annot_kws={'fontsize': 9},
+    xticklabels=corr_matrix.columns,
+    yticklabels=False
+)
+
+# 设置 x 轴标签在顶部
+ax.xaxis.tick_top()
+ax.xaxis.set_label_position('top')
+plt.xticks(rotation=45, ha='left', fontsize=10)
+
+# 在对角线上手动添加变量名
+for i, label in enumerate(corr_matrix.columns):
+    ax.text(
+        i + 0.5,
+        i + 0.5,
+        label,
+        ha='right',
+        va='center',
+        rotation=0,
+        fontsize=10,
+        color='black'
+    )
+
+# 标题
+plt.title("Spearman Correlation Matrix with Significance (Upper Triangle)", fontsize=16, pad=35)
+
+plt.tight_layout()
+
+# 保存高分辨率图片
+output_png = r'D:\不爱学习。\2025\6月\spearman相关性分析\spearman_matrix_significance.png'
+output_tif = r'D:\不爱学习。\2025\6月\spearman相关性分析\spearman_matrix_significance.tif'
+
+plt.savefig(output_png, dpi=600, bbox_inches='tight')
+plt.savefig(output_tif, dpi=600, bbox_inches='tight')
+plt.show()
+
+print(f"图像已保存为：\n{output_png}\n{output_tif}")
