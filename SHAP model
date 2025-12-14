@@ -1,0 +1,50 @@
+import pandas as pd
+import numpy as np
+from geopy.distance import geodesic
+from sklearn.ensemble import RandomForestRegressor
+import shap
+import matplotlib.pyplot as plt
+
+# ==== 参数设置 ====
+BANDWIDTH = 15000
+RF_PARAMS = {'n_estimators': 100, 'max_depth': 10, 'min_samples_split': 5}
+RANDOM_STATE = 42
+
+# ==== 加权函数 ====
+def calculate_weights(coords, target_point, bandwidth=BANDWIDTH):
+    distances = coords.apply(lambda row: geodesic((row[0], row[1]), target_point).meters, axis=1)
+    weights = np.exp(-0.5 * (distances / bandwidth) ** 2)
+    return weights.values
+
+# ==== 数据路径 ====
+path = r"C:\Users\Kay\论文数据处理\GWRF"
+train_data = pd.read_excel(path + r"\train_data_0610.xlsx")
+
+# ==== 提取数据 ====
+coord_cols = ['y_cordinat', 'x_cordinat']
+target_col = 'Y'
+feature_cols = train_data.columns.difference([target_col] + coord_cols)
+
+X = train_data[feature_cols]
+y = train_data[target_col]
+coords = train_data[coord_cols]
+
+# ==== 选取某一个点（你可以换成其他点） ====
+sample_index = 0  # 选第一个点作为样例
+target_point = (coords.iloc[sample_index, 0], coords.iloc[sample_index, 1])
+weights = calculate_weights(coords, target_point)
+
+# ==== 拟合模型 ====
+model = RandomForestRegressor(**RF_PARAMS, random_state=RANDOM_STATE)
+model.fit(X, y, sample_weight=weights)
+
+# ==== SHAP 解释 ====
+explainer = shap.TreeExplainer(model)
+shap_values = explainer.shap_values(X)
+
+# ==== 绘图 ====
+shap.summary_plot(shap_values, X, plot_type="bar")  # 特征重要性柱状图
+shap.summary_plot(shap_values, X)                   # 分布图（推荐）
+
+# （可选）解释某一个样本点（局部解释）
+# shap.force_plot(explainer.expected_value, shap_values[sample_index], X.iloc[sample_index], matplotlib=True)
