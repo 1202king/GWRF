@@ -1,0 +1,207 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.model_selection import KFold
+from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error, mean_absolute_percentage_error
+from tqdm.notebook import tqdm
+import warnings
+
+warnings.filterwarnings("ignore")
+
+# ==========================================
+# 1. 参数设置
+# ==========================================
+PATH = r"C:\Users\Administrator\GWRF"
+TRAIN_FILE = "train_data_0610.xlsx"     # 训练数据 (必须包含 Y)
+PREDICT_FILE = "predict_data_0610.xlsx" # 待预测数据 (全市网格点)
+
+BANDWIDTH = 15000  # 确定的最优带宽
+TARGET_COL = 'Y'
+COORD_COLS = ['y_cordinat', 'x_cordinat']
+
+# 【关键】根据你提供的列名，明确指定特征列表
+# 这样可以确保训练集和预测集的特征顺序完全一致，防止报错
+FEATURE_COLS = [
+    'SHDI', 'SHAPE', 'PD', 'CONTIG', 
+    'DistFacility', 'DistWater', 'DistAccommodation', 'DistRoad', 
+    'DistRestaurant', 'DistMountain', 'DistScenicSite', 'DistBusStop', 
+    'Terrain relief', 'TRI', 'Annual NDVI', 'Elevation', 'Travel time'
+]
+
+# ==========================================
+# 2. 核心函数定义
+# ==========================================
+def calculate_weights(coords_train, target_point, bandwidth):
+    """计算高斯权重"""
+    lats = coords_train.iloc[:, 0].values
+    lons = coords_train.iloc[:, 1].values
+    t_lat, t_lon = target_point
+    
+    R = 6371000
+    dlat = np.radians(lats - t_lat)
+    dlon = np.radians(lons - t_lon)
+    a = np.sin(dlat/2)**2 + np.cos(np.radians(t_lat)) * np.cos(np.radians(lats)) * np.sin(dlon/2)**2
+    c = 2 * np.arctan2(np.sqrt(a), np.sqrt(1-a))
+    distances = R * c
+    
+    return np.exp(-0.5 * (distances / bandwidth) ** 2)
+
+def evaluate_performance(X, y, coords, bandwidth):
+    """5折交叉验证评估模型性能 (含 R2, RMSE, MSE, MAE, MAPE)"""
+    print("\n==== 1. 正在评估模型性能 (5-Fold CV) ====")
+    kf = KFold(n_splits=5, shuffle=True, random_state=42)
+    
+    metrics = {'R2': [], 'RMSE': [], 'MSE': [], 'MAE': [], 'MAPE': []}
+    
+    fold = 0
+    for train_idx, test_idx in kf.split(X):
+        fold += 1
+        X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
+        y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
+        coords_train, coords_test = coords.iloc[train_idx], coords.iloc[test_idx]
+        
+        preds = []
+        # 针对测试集的每个点进行预测
+        for i in range(len(X_test)):
+            target_pt = (coords_test.iloc[i, 0], coords_test.iloc[i, 1])
+            w = calculate_weights(coords_train, target_pt, bandwidth)
+            
+            # 混合策略: 有效样本太少则用均值填充，防止报错
+            if np.sum(w > 0.05) < 5:
+                preds.append(y_train.mean())
+                continue
+                
+            try:
+                lrf = RandomForestRegressor(n_estimators=40, max_depth=6, n_jobs=1, random_state=42)
+                lrf.fit(X_train, y_train, sample_weight=w)
+                preds.append(lrf.predict(X_test.iloc[[i]])[0])
+            except:
+                preds.append(y_train.mean())
+        
+        # 计算指标
+        metrics['R2'].append(r2_score(y_test, preds))
+        metrics['RMSE'].append(np.sqrt(mean_squared_error(y_test, preds)))
+        metrics['MSE'].append(mean_squared_error(y_test, preds))
+        metrics['MAE'].append(mean_absolute_error(y_test, preds))
+        metrics['MAPE'].append(mean_absolute_percentage_error(y_test, preds))
+        
+        print(f"  Fold {fold}: R2={metrics['R2'][-1]:.4f}")
+
+    # 输出汇总表
+    print("\n========== 模型性能指标 (Model Performance) ==========")
+    print(f"{'Metric':<10} | {'Mean':<10} | {'Std. Dev (Robustness)':<10}")
+    print("-" * 45)
+    for k, v in metrics.items():
+        if k == 'MAPE':
+            print(f"{k:<10} | {np.mean(v):.2%}     | ± {np.std(v):.2%}")
+        else:
+            print(f"{k:<10} | {np.mean(v):.4f}     | ± {np.std(v):.4f}")
+    print("-" * 45)
+
+# ==========================================
+# 3. 主程序逻辑
+# ==========================================
+def run_full_process():
+    # --- 加载数据 ---
+    print(f"正在加载数据...\n路径: {PATH}")
+    try:
+        df_train = pd.read_excel(f"{PATH}\\{TRAIN_FILE}")
+        df_pred = pd.read_excel(f"{PATH}\\{PREDICT_FILE}")
+        print(f"✅ 加载成功: 训练集 {len(df_train)} 条, 预测集 {len(df_pred)} 条")
+    except Exception as e:
+        print(f"❌ 读取失败: {e}")
+        return
+
+    # --- 数据准备 (使用你提供的列名) ---
+    # 检查列是否存在
+    missing_train = [c for c in FEATURE_COLS if c not in df_train.columns]
+    missing_pred = [c for c in FEATURE_COLS if c not in df_pred.columns]
+    
+    if missing_train:
+        print(f"❌ 训练集缺少特征: {missing_train}")
+        return
+    if missing_pred:
+        print(f"❌ 预测集缺少特征: {missing_pred}")
+        return
+
+    X_train = df_train[FEATURE_COLS]
+    y_train = df_train[TARGET_COL]
+    coords_train = df_train[COORD_COLS]
+    
+    X_pred = df_pred[FEATURE_COLS]
+    coords_pred = df_pred[COORD_COLS]
+
+    # --- 步骤 1: 评估模型 (生成论文需要的指标表格) ---
+    evaluate_performance(X_train, y_train, coords_train, BANDWIDTH)
+    
+    # --- 步骤 2: 训练全局基准模型 (用于填充孤岛) ---
+    print("\n==== 2. 训练全局基准模型 (Global RF Baseline) ====")
+    global_rf = RandomForestRegressor(n_estimators=100, random_state=42, n_jobs=-1)
+    global_rf.fit(X_train, y_train)
+    print("全局模型训练完毕，准备用于混合填充。")
+
+    # --- 步骤 3: 全市预测 (GWRF Loop) ---
+    print(f"\n==== 3. 开始全市预测 (Predicting {len(X_pred)} points) ====")
+    print(f"带宽: {BANDWIDTH}m | 策略: GWRF + Global Fill (Hybrid)")
+    
+    y_pred_final = []
+    status_flags = [] # 0=GWRF, 1=Global Fill
+    
+    # 使用 tqdm 显示进度条
+    for i in tqdm(range(len(X_pred))):
+        target_pt = (coords_pred.iloc[i, 0], coords_pred.iloc[i, 1])
+        
+        # 计算权重
+        w = calculate_weights(coords_train, target_pt, bandwidth=BANDWIDTH)
+        
+        # 【混合策略判断】
+        # 如果有效样本(权重>0.05)少于5个，说明该点处于"数据盲区/孤岛"
+        # 此时强行跑GWRF会报错或过拟合，改用全局模型预测
+        if np.sum(w > 0.05) < 5:
+            pred = global_rf.predict(X_pred.iloc[[i]])[0]
+            y_pred_final.append(pred)
+            status_flags.append(1) # 标记为Global填充
+            continue
+
+        try:
+            # 局部训练
+            lrf = RandomForestRegressor(n_estimators=40, max_depth=6, n_jobs=1, random_state=42)
+            lrf.fit(X_train, y_train, sample_weight=w)
+            
+            pred = lrf.predict(X_pred.iloc[[i]])[0]
+            y_pred_final.append(pred)
+            status_flags.append(0) # 标记为GWRF预测
+            
+        except:
+            # 万一报错，兜底策略
+            pred = global_rf.predict(X_pred.iloc[[i]])[0]
+            y_pred_final.append(pred)
+            status_flags.append(1)
+
+    # --- 步骤 4: 保存与可视化 ---
+    df_pred['Predicted_Y'] = y_pred_final
+    df_pred['Prediction_Type'] = ['Global_Fill' if s==1 else 'GWRF' for s in status_flags]
+    
+    save_path = f"{PATH}\\City_Prediction_Result_15k.xlsx"
+    df_pred.to_excel(save_path, index=False)
+    
+    print(f"\n✅ 预测完成！")
+    print(f"   - GWRF 预测点数: {status_flags.count(0)} (高精度局部预测)")
+    print(f"   - Global 填充点数: {status_flags.count(1)} (偏远孤岛填充)")
+    print(f"   - 结果已保存至: {save_path}")
+    
+    # 画图
+    plt.figure(figsize=(12, 10))
+    sc = plt.scatter(df_pred['x_cordinat'], df_pred['y_cordinat'], 
+                     c=df_pred['Predicted_Y'], cmap='Spectral_r', 
+                     s=10, alpha=0.9)
+    plt.colorbar(sc, label='Predicted Recreation Service Value')
+    plt.title(f"City-wide Prediction Map (Bandwidth: {BANDWIDTH}m)")
+    plt.xlabel("Longitude")
+    plt.ylabel("Latitude")
+    plt.axis('equal')
+    plt.show()
+
+if __name__ == "__main__":
+    run_full_process()
