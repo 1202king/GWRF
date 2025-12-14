@@ -1,0 +1,212 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.ensemble import RandomForestRegressor
+from tqdm import tqdm
+import warnings
+import os
+
+# ==========================================
+# 0. 环境与画图配置 (出版级设置)
+# ==========================================
+warnings.filterwarnings("ignore")
+
+# --- 字体与样式设置 ---
+# 设置为 Times New Roman
+plt.rcParams['font.family'] = 'serif'
+plt.rcParams['font.serif'] = ['Times New Roman']
+# 解决负号显示问题
+plt.rcParams['axes.unicode_minus'] = False 
+# 设置基础字号
+plt.rcParams['font.size'] = 14 
+
+# 参数设置
+PATH = r"C:\Users\Administrator\GWRF"
+FILE_NAME = "train_data_0610.xlsx"
+BANDWIDTH = 15000 
+TARGET_COL = 'Y'
+COORD_COLS = ['y_cordinat', 'x_cordinat']
+
+FEATURE_COLS = [
+    'SHDI', 'SHAPE', 'PD', 'CONTIG', 
+    'DistFacility', 'DistWater', 'DistAccommodation', 'DistRoad', 
+    'DistRestaurant', 'DistMountain', 'DistScenicSite', 'DistBusStop', 
+    'Terrain relief', 'TRI', 'Annual NDVI', 'Elevation', 'Travel time'
+]
+
+# ==========================================
+# 1. 核心计算函数 (保持不变)
+# ==========================================
+def calculate_weights(coords_train, target_point, bandwidth):
+    lats = coords_train.iloc[:, 0].values
+    lons = coords_train.iloc[:, 1].values
+    t_lat, t_lon = target_point
+    R = 6371000 
+    dlat = np.radians(lats - t_lat)
+    dlon = np.radians(lons - t_lon)
+    a = np.sin(dlat/2)**2 + np.cos(np.radians(t_lat)) * np.cos(np.radians(lats)) * np.sin(dlon/2)**2
+    c = 2 * np.arctan2(np.sqrt(a), np.sqrt(1-a))
+    distances = R * c
+    return np.exp(-0.5 * (distances / bandwidth) ** 2)
+
+# ==========================================
+# 2. 单独绘制精美条形图的函数
+# ==========================================
+def save_high_res_bar_chart(roi_name, data_series, color, output_folder):
+    """
+    绘制并保存单张高清条形图
+    """
+    # 创建独立画布，比例设置为 6:4，适合论文插图
+    fig, ax = plt.subplots(figsize=(6, 4))
+    
+    # 绘制水平条形图
+    y_pos = np.arange(len(data_series))
+    bars = ax.barh(y_pos, data_series.values, color=color, alpha=0.85, height=0.6)
+    
+    # 设置 Y 轴标签
+    ax.set_yticks(y_pos)
+    ax.set_yticklabels(data_series.index, fontsize=14) # 字体大一点
+    
+    # X 轴设置
+    ax.set_xlabel('Feature Importance', fontsize=14, fontweight='bold', labelpad=10)
+    
+    # --- 美化细节 ---
+    # 1. 去除上边和右边的边框
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    # 2. 加粗左边和底部的轴线
+    ax.spines['left'].set_linewidth(1.2)
+    ax.spines['bottom'].set_linewidth(1.2)
+    # 3. 添加垂直虚线网格
+    ax.grid(axis='x', linestyle='--', alpha=0.3)
+    
+    # 在柱子旁边标注数值
+    max_val = data_series.max()
+    ax.set_xlim(0, max_val * 1.25) # 留出右侧空间给数字
+    
+    for bar in bars:
+        width = bar.get_width()
+        ax.text(width + (max_val * 0.02), # 稍微偏移一点
+                bar.get_y() + bar.get_height()/2, 
+                f'{width:.3f}', 
+                va='center', 
+                fontsize=12,
+                fontname='Times New Roman')
+
+    # 标题 (可选，既然你要后期排版，标题可以不要，这里保留作为文件区分)
+    clean_name = roi_name.replace(" ", "_").replace("(", "").replace(")", "")
+    # ax.set_title(roi_name, fontsize=16, fontweight='bold', pad=15) 
+    
+    plt.tight_layout()
+    
+    # 保存为 1000 DPI
+    save_name = f"{output_folder}\\BarChart_{clean_name}.png"
+    plt.savefig(save_name, dpi=1000, bbox_inches='tight')
+    plt.close(fig) # 关闭画布释放内存
+    print(f"🖼️ 已保存高清图片: {save_name}")
+
+# ==========================================
+# 3. 主程序
+# ==========================================
+def run_export_viz():
+    print("🚀 开始计算并导出高清图表...")
+    
+    # 1. 数据加载
+    try:
+        df = pd.read_excel(f"{PATH}\\{FILE_NAME}")
+        df = df.reset_index(drop=True)
+        print(f"✅ 数据加载成功: {len(df)} 样本")
+    except Exception as e:
+        print(f"❌ 失败: {e}")
+        return
+
+    X = df[FEATURE_COLS]
+    y = df[TARGET_COL]
+    coords = df[COORD_COLS]
+
+    # 2. 训练全局模型 (基准)
+    print("⏳ 训练全局模型...")
+    grf = RandomForestRegressor(n_estimators=100, random_state=42, n_jobs=-1).fit(X, y)
+    global_imp = grf.feature_importances_
+    
+    # 3. GWRF 计算 (同之前)
+    local_imps = []
+    print("⏳ 计算局部重要性 (请稍候)...")
+    
+    for i in tqdm(range(len(X))):
+        target_pt = (coords.iloc[i, 0], coords.iloc[i, 1])
+        w = calculate_weights(coords, target_pt, BANDWIDTH)
+        
+        use_global = False
+        if np.sum(w > 0.05) < 5:
+            use_global = True
+        else:
+            try:
+                lrf = RandomForestRegressor(n_estimators=20, max_depth=4, n_jobs=1, random_state=42)
+                lrf.fit(X, y, sample_weight=w)
+                imp = lrf.feature_importances_
+                if np.sum(imp) < 1e-6: 
+                    use_global = True
+                else:
+                    local_imps.append(imp)
+            except:
+                use_global = True
+        
+        if use_global:
+            local_imps.append(global_imp)
+    
+    df_imp = pd.DataFrame(local_imps, columns=FEATURE_COLS, index=df.index)
+    
+    # ==============================================================================
+    # 4. 定义 ROI 并导出图片
+    # ==============================================================================
+    roi_definitions = [
+        # Region A
+        {
+            'label': 'Region A (Central)', 
+            'center_lon': 103.70, 'center_lat': 25.60, 
+            'width': 0.8, 'height': 0.8, 
+            'color': '#F4A261' # 橙色
+        },
+        # Region B
+        {
+            'label': 'Region B (South)', 
+            'center_lon': 104.35, 'center_lat': 25.00, 
+            'width': 0.30, 'height': 0.30, 
+            'color': '#2A9D8F' # 青色
+        }
+    ]
+
+    print("\n🎨 开始绘制独立高清图表...")
+    
+    for roi in roi_definitions:
+        # 筛选区域数据
+        lon_min = roi['center_lon'] - roi['width']/2
+        lon_max = roi['center_lon'] + roi['width']/2
+        lat_min = roi['center_lat'] - roi['height']/2
+        lat_max = roi['center_lat'] + roi['height']/2
+        
+        mask = (df['x_cordinat'] >= lon_min) & (df['x_cordinat'] <= lon_max) & \
+               (df['y_cordinat'] >= lat_min) & (df['y_cordinat'] <= lat_max)
+        
+        if mask.sum() > 0:
+            subset_imp = df_imp.loc[mask]
+            mean_imp = subset_imp.mean()
+            
+            # 数据校验
+            if mean_imp.sum() < 1e-6:
+                mean_imp = pd.Series(global_imp, index=FEATURE_COLS)
+            
+            # 取 Top 5 并排序 (升序，为了画图时最大的在最上面)
+            top_5 = mean_imp.sort_values(ascending=True).tail(5)
+            
+            # 调用画图函数
+            save_high_res_bar_chart(roi['label'], top_5, roi['color'], PATH)
+            
+        else:
+            print(f"⚠️ 区域 {roi['label']} 为空，跳过。")
+
+    print("\n✅ 所有图片导出完成！请检查文件夹。")
+
+if __name__ == "__main__":
+    run_export_viz()
