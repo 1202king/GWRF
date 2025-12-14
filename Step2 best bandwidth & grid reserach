@@ -139,9 +139,3 @@ plt.axvline(best_bw, color='green', linestyle='-', linewidth=2, label=f'Optimal:
 plt.title("Bandwidth Optimization: Trade-off between Accuracy and Coverage")
 fig.tight_layout()
 plt.show()
-
-print("\n💡 决策建议：")
-print("1. 蓝线 (R²) 应该会呈现先上升后下降（或趋于平稳）的趋势。")
-print("2. 红线 (Validity) 会随着带宽增加而上升，直到 1.0。")
-print("3. 我们选的那个点，是红线足够高，且蓝线处于峰值的位置。")
-print("这就是你否定 10km，改用新带宽的铁证。")
