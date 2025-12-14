@@ -1,0 +1,176 @@
+import pandas as pd
+import numpy as np
+from geopy.distance import geodesic
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.metrics import mean_squared_error, r2_score
+from sklearn.model_selection import KFold
+import shap
+from tqdm import tqdm
+import joblib
+import matplotlib.pyplot as plt
+
+# ==== 参数设置 ====
+BANDWIDTH = 10000
+RANDOM_STATE = 42
+
+# ==== 初始 RF 搜索范围 ====
+PARAM_GRID = {
+    'n_estimators': [100, 200, 400],
+    'max_depth': [10, 20, None],
+    'min_samples_split': [2, 5]
+}
+
+# ==== 加权函数 ====
+def calculate_weights(coords, target_point, bandwidth=BANDWIDTH):
+    distances = coords.apply(lambda row: geodesic((row[0], row[1]), target_point).meters, axis=1)
+    weights = np.exp(-0.5 * (distances / bandwidth) ** 2)
+    return weights.values
+
+
+# ==== 自定义网格搜索函数（核心新增部分） ====
+def gwrf_grid_search(X, y, coords, param_grid, folds=3):
+    kf = KFold(n_splits=folds, shuffle=True, random_state=RANDOM_STATE)
+
+    best_score = -np.inf
+    best_params = None
+
+    print("\n========== 开始进行 GWRF 网格搜索 ==========")
+
+    # 遍历所有超参数组合
+    from itertools import product
+    keys = list(param_grid.keys())
+    combinations = list(product(*param_grid.values()))
+
+    print(f"[信息] 共需评估 {len(combinations)} 组超参数")
+
+    for combo in combinations:
+        params = dict(zip(keys, combo))
+        fold_scores = []
+
+        print(f"\n[信息] 正在评估参数组合: {params}")
+
+        for fold, (train_idx, val_idx) in enumerate(kf.split(X), 1):
+
+            X_train, X_val = X.iloc[train_idx], X.iloc[val_idx]
+            y_train, y_val = y.iloc[train_idx], y.iloc[val_idx]
+            coords_train, coords_val = coords.iloc[train_idx], coords.iloc[val_idx]
+
+            y_pred_val = []
+
+            for i in range(len(X_val)):
+                target_point = (coords_val.iloc[i, 0], coords_val.iloc[i, 1])
+                weights = calculate_weights(coords_train, target_point)
+
+                model = RandomForestRegressor(**params, random_state=RANDOM_STATE)
+                model.fit(X_train, y_train, sample_weight=weights)
+                pred = model.predict(X_val.iloc[[i]])[0]
+                y_pred_val.append(pred)
+
+            fold_r2 = r2_score(y_val, y_pred_val)
+            fold_scores.append(fold_r2)
+
+        avg_score = np.mean(fold_scores)
+        print(f"[结果] 参数 {params} 的平均验证 R² = {avg_score:.4f}")
+
+        if avg_score > best_score:
+            best_score = avg_score
+            best_params = params
+
+    print("\n========== 网格搜索结束 ==========")
+    print(f"[最优参数] {best_params}")
+    print(f"[最优平均验证 R²] {best_score:.4f}")
+
+    return best_params
+
+
+# ==== 主函数 ====
+def gwrf_optimized():
+
+    # 1. 数据读取
+    path = r"C:\Users\Administrator\GWRF"
+    train_data = pd.read_excel(path + r"\train_data_0610.xlsx")
+    predict_data = pd.read_excel(path + r"\predict_data_0610.xlsx")
+
+    coord_cols = ['y_cordinat', 'x_cordinat']
+    target_col = 'Y'
+    feature_cols = train_data.columns.difference([target_col] + coord_cols)
+
+    X = train_data[feature_cols]
+    y = train_data[target_col]
+    coords = train_data[coord_cols]
+
+    # 2. 运行 GWRF 网格搜索（新增）
+    best_params = gwrf_grid_search(X, y, coords, PARAM_GRID, folds=3)
+
+    # 将最优参数用于后续模型
+    print("\n[信息] 使用最优超参数进行模型训练：")
+    print(best_params)
+
+    # 3. 使用最优超参数做5折交叉验证（保持你原来的流程）
+    kf = KFold(n_splits=5, shuffle=True, random_state=RANDOM_STATE)
+
+    val_r2_list = []
+    train_r2_list = []
+
+    print("\n[信息] 使用最优参数进行 5 折交叉验证...")
+
+    for fold, (train_idx, val_idx) in enumerate(kf.split(X), 1):
+
+        X_train, X_val = X.iloc[train_idx], X.iloc[val_idx]
+        y_train, y_val = y.iloc[train_idx], y.iloc[val_idx]
+        coords_train, coords_val = coords.iloc[train_idx], coords.iloc[val_idx]
+
+        # 验证集预测
+        y_pred_val = []
+        for i in tqdm(range(len(X_val))):
+            target_point = (coords_val.iloc[i, 0], coords_val.iloc[i, 1])
+            weights = calculate_weights(coords_train, target_point)
+
+            model = RandomForestRegressor(**best_params, random_state=RANDOM_STATE)
+            model.fit(X_train, y_train, sample_weight=weights)
+            pred = model.predict(X_val.iloc[[i]])[0]
+            y_pred_val.append(pred)
+
+        # 训练集 LOO 预测
+        y_pred_train = []
+        for i in tqdm(range(len(X_train))):
+            target_point = (coords_train.iloc[i, 0], coords_train.iloc[i, 1])
+            weights = calculate_weights(coords_train.drop(index=X_train.index[i]), target_point)
+
+            model = RandomForestRegressor(**best_params, random_state=RANDOM_STATE)
+            model.fit(
+                X_train.drop(index=X_train.index[i]),
+                y_train.drop(index=X_train.index[i]),
+                sample_weight=weights
+            )
+            pred = model.predict(X_train.iloc[[i]])[0]
+            y_pred_train.append(pred)
+
+        train_r2_list.append(r2_score(y_train, y_pred_train))
+        val_r2_list.append(r2_score(y_val, y_pred_val))
+
+        print(f"[Fold {fold}] Train R²={train_r2_list[-1]:.4f}, Val R²={val_r2_list[-1]:.4f}")
+
+    print("\n========== 5折交叉验证结果 ==========")
+    print(f"平均训练 R²: {np.mean(train_r2_list):.4f}")
+    print(f"平均验证 R²: {np.mean(val_r2_list):.4f}")
+
+    # 4. SHAP 可解释性
+    print("\n[信息] 正在进行 SHAP 分析...")
+    model = RandomForestRegressor(**best_params, random_state=RANDOM_STATE)
+
+    sample_point = (coords_val.iloc[0, 0], coords_val.iloc[0, 1])
+    sample_weights = calculate_weights(coords_train, sample_point)
+
+    model.fit(X_train, y_train, sample_weight=sample_weights)
+
+    explainer = shap.TreeExplainer(model)
+    shap_values = explainer.shap_values(X_val)
+
+    shap.summary_plot(shap_values, X_val, plot_type="bar")
+    shap.summary_plot(shap_values, X_val)
+
+
+# ==== 运行 ====
+if __name__ == '__main__':
+    gwrf_optimized()
