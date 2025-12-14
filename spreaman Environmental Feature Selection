@@ -5,7 +5,7 @@ import numpy as np
 from scipy.stats import spearmanr
 
 # 文件路径
-file_path = r'D:\不爱学习。\2025\6月\spearman相关性分析\train_data.xlsx'
+file_path = r'D:\spearman\orginal_data.xlsx'
 
 # 读取数据
 data = pd.read_excel(file_path)
