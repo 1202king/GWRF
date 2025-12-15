@@ -1,0 +1,138 @@
+import pandas as pd
+import numpy as np
+import shap
+import matplotlib.pyplot as plt
+import os
+from sklearn.ensemble import RandomForestRegressor
+from geopy.distance import geodesic
+import warnings
+
+# 忽略警告
+warnings.filterwarnings("ignore")
+
+# ==========================================
+# 1. 参数与路径配置
+# ==========================================
+file_path = r'C:\Users\Kay\GWRF\biophy.xlsx'
+save_path = r'C:\Users\GWRF\SHAP_单变量图_期刊版'
+os.makedirs(save_path, exist_ok=True)
+
+# GWRF 参数
+BANDWIDTH = 15000 
+RF_PARAMS = {'n_estimators': 100, 'max_depth': 10, 'min_samples_split': 5, 'random_state': 42}
+
+# ==========================================
+# 2. 全局绘图风格设置 (Times New Roman)
+# ==========================================
+def set_publication_style():
+    plt.rcParams.update({
+        'font.family': 'serif',
+        'font.serif': ['Times New Roman'],
+        'mathtext.fontset': 'stix',
+        'font.size': 14,
+        'axes.labelsize': 16,
+        'xtick.labelsize': 14,
+        'ytick.labelsize': 14,
+        'figure.dpi': 1000,
+        'savefig.dpi': 1000,
+        'axes.unicode_minus': False
+    })
+
+set_publication_style()
+
+# ==========================================
+# 3. 数据准备与 GWRF 模型训练
+# ==========================================
+print("1. 读取数据并准备模型...")
+train_data = pd.read_excel(file_path)
+coord_cols = ['y_cordinat', 'x_cordinat'] 
+target_col = 'Y'
+feature_cols = [c for c in train_data.columns if c not in [target_col] + coord_cols]
+
+X_train = train_data[feature_cols]
+y_train = train_data[target_col]
+coords = train_data[coord_cols]
+
+# 计算地理权重 (使用几何中心)
+center_lat = coords[coord_cols[0]].mean()
+center_lon = coords[coord_cols[1]].mean()
+target_point = (center_lat, center_lon)
+
+print(f"2. 计算权重 (带宽: {BANDWIDTH}m)...")
+distances = coords.apply(lambda row: geodesic((row[0], row[1]), target_point).meters, axis=1)
+sample_weights = np.exp(-0.5 * (distances / BANDWIDTH) ** 2)
+
+print("3. 训练 GWRF 模型并计算 SHAP 值...")
+model = RandomForestRegressor(**RF_PARAMS)
+model.fit(X_train, y_train, sample_weight=sample_weights)
+
+explainer = shap.TreeExplainer(model)
+shap_values = explainer.shap_values(X_train)
+
+# ==========================================
+# 4. 单变量依赖图绘图函数
+# ==========================================
+def plot_single_dependence_hq(feature_name):
+    """
+    绘制高质量的单变量 SHAP 依赖图 (无交互颜色)
+    """
+    # 1. 创建画布
+    fig, ax = plt.subplots(figsize=(8, 6), dpi=120) # 屏幕显示DPI
+    
+    # 2. 调用 SHAP 绘图
+    # interaction_index=None 是关键，这使得图表变成单色，只展示单变量影响
+    shap.dependence_plot(
+        ind=feature_name,
+        shap_values=shap_values,
+        features=X_train,
+        interaction_index=None,  # 【关键】关闭交互着色
+        show=False,              # 挂起以允许修改
+        ax=ax,
+        alpha=0.7,               # 点的透明度
+        dot_size=20,             # 点的大小
+        x_jitter=0.5             # 稍微抖动x轴数据防止重叠（可选）
+    )
+    
+    # 3. 样式精修 (期刊级格式)
+    
+    # 去除上右边框 (符合您的参考代码)
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    
+    # 强制修改字体为 Times New Roman
+    ax.set_xlabel(feature_name, fontname='Times New Roman', fontsize=18)
+    ax.set_ylabel(f"SHAP value for\n{feature_name}", fontname='Times New Roman', fontsize=18)
+    
+    # 修改刻度字体
+    for label in ax.get_xticklabels() + ax.get_yticklabels():
+        label.set_fontname('Times New Roman')
+        label.set_fontsize(14)
+        
+    # 添加一条 y=0 的虚线 (可选，但建议加上，方便看正负影响)
+    ax.axhline(0, color='gray', linestyle='--', linewidth=1, alpha=0.5)
+
+    # 4. 保存
+    safe_name = feature_name.replace("/", "_").replace("\\", "_")
+    save_file = os.path.join(save_path, f"Single_{safe_name}.jpg")
+    
+    # 使用 bbox_inches='tight' 防止标签被切
+    plt.savefig(save_file, dpi=1000, bbox_inches='tight')
+    plt.close()
+    print(f"  -> 已保存: {save_file}")
+
+# ==========================================
+# 5. 执行绘图
+# ==========================================
+if __name__ == '__main__':
+    # 自动绘制最重要的前 6 个特征 (或者您可以循环绘制所有 feature_cols)
+    print("4. 开始绘制单变量图...")
+    
+    # 计算特征重要性排序
+    feature_importance = np.abs(shap_values).mean(0)
+    sorted_idx = np.argsort(feature_importance)[::-1] # 降序
+    top_features = X_train.columns[sorted_idx][:17]    
+    
+    for feature in top_features:
+        plot_single_dependence_hq(feature)
+        
+    print(f"\n✅ 图片已保存至: {save_path}")
