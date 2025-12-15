@@ -1,0 +1,202 @@
+import pandas as pd
+import numpy as np
+import shap
+import matplotlib.pyplot as plt
+import os
+from sklearn.ensemble import RandomForestRegressor
+from geopy.distance import geodesic
+import warnings
+
+# 忽略警告
+warnings.filterwarnings("ignore")
+
+# ==========================================
+# 1. 参数与路径配置
+# ==========================================
+# 请修改为您的实际路径
+file_path = r'C:\Users\Kay\GWRF\biophy.xlsx'
+base_save_path = r'C:\Users\Kay\GWRF\SHAP_交互分析_期刊版'
+os.makedirs(base_save_path, exist_ok=True)
+
+# GWRF 参数 (与论文一致)
+BANDWIDTH = 15000 
+RF_PARAMS = {
+    'n_estimators': 100,
+    'max_depth': 10,
+    'min_samples_split': 5,
+    'random_state': 42
+}
+
+# ==========================================
+# 2. 全局绘图风格设置 (Times New Roman)
+# ==========================================
+def set_publication_style():
+    plt.rcParams.update({
+        'font.family': 'serif',
+        'font.serif': ['Times New Roman'],
+        'mathtext.fontset': 'stix',
+        'font.size': 14,
+        'axes.labelsize': 16,
+        'xtick.labelsize': 14,
+        'ytick.labelsize': 14,
+        'figure.dpi': 1000,
+        'savefig.dpi': 1000,
+        'axes.unicode_minus': False
+    })
+
+set_publication_style()
+
+# ==========================================
+# 3. 数据读取与 GWRF 权重计算
+# ==========================================
+print("1. 读取数据...")
+train_data = pd.read_excel(file_path)
+
+# 定义列 (请确保列名正确)
+coord_cols = ['y_cordinat', 'x_cordinat'] 
+target_col = 'Y'
+feature_cols = [c for c in train_data.columns if c not in [target_col] + coord_cols]
+
+X_train = train_data[feature_cols]
+y_train = train_data[target_col]
+coords = train_data[coord_cols]
+feature_names = X_train.columns.tolist()
+
+print(f"2. 计算地理权重 (带宽: {BANDWIDTH}m)...")
+# 计算几何中心
+center_lat = coords[coord_cols[0]].mean()
+center_lon = coords[coord_cols[1]].mean()
+target_point = (center_lat, center_lon)
+
+# 计算距离和权重
+distances = coords.apply(
+    lambda row: geodesic((row[coord_cols[0]], row[coord_cols[1]]), target_point).meters, 
+    axis=1
+)
+sample_weights = np.exp(-0.5 * (distances / BANDWIDTH) ** 2)
+
+# ==========================================
+# 4. 模型训练与 SHAP 计算
+# ==========================================
+print("3. 训练 GWRF 模型...")
+model = RandomForestRegressor(**RF_PARAMS)
+model.fit(X_train, y_train, sample_weight=sample_weights)
+
+print("4. 计算 SHAP 交互值 (可能需要几分钟)...")
+explainer = shap.TreeExplainer(model)
+# 计算交互值矩阵: (样本数, 特征数, 特征数)
+shap_interaction_values = explainer.shap_interaction_values(X_train)
+
+# ==========================================
+# 5. 核心绘图函数 (完全复刻您的代码逻辑)
+# ==========================================
+def plot_interaction_style_reference(feature_i_name, feature_j_name):
+    """
+    使用您提供的逻辑绘制 SHAP 交互图。
+    Logic: 构造一个只有第 i 列有值的 2D 矩阵，欺骗 dependence_plot 画出纯交互效应。
+    """
+    try:
+        # 获取特征索引
+        feature_i = feature_names.index(feature_i_name) # 主特征 (X轴)
+        feature_j = feature_names.index(feature_j_name) # 交互特征 (颜色)
+    except ValueError:
+        print(f"跳过: 找不到特征 {feature_i_name} 或 {feature_j_name}")
+        return
+
+    # --- 核心逻辑 (源自您提供的代码) ---
+    # 1. 提取交互值向量
+    # 注意：SHAP交互矩阵是对称的，且通常平分了影响。
+    # 如果要显示单向完整影响，有时需 * 2，但这里保持原生值以符合您参考图的量级。
+    interaction_values_vec = shap_interaction_values[:, feature_i, feature_j]
+
+    # 2. 构造二维 SHAP 值矩阵
+    # 将交互值填充到第 i 列，其他列设为 0
+    shap_values_2d = np.zeros((X_train.shape[0], len(feature_names)))
+    shap_values_2d[:, feature_i] = interaction_values_vec
+    # ----------------------------------
+
+    # 设置画布
+    fig = plt.figure(figsize=(10, 8)) # 稍微调宽一点适应长标签
+
+    # 3. 绘图
+    # cmap=plt.get_cmap("coolwarm") 确保颜色是从蓝到红的渐变，符合参考图风格
+    shap.dependence_plot(
+        ind=feature_i,                # 主特征索引
+        shap_values=shap_values_2d,   # 替换后的矩阵 (Y轴将显示交互值)
+        features=X_train,             # 原始特征数据
+        interaction_index=feature_j,  # 颜色编码特征索引
+        show=False,                   # 挂起以修改样式
+        alpha=0.8,                    # 透明度
+        dot_size=30,                  # 点的大小
+        ax=plt.gca()
+    )
+
+    # --- 4. 期刊格式精修 ---
+    ax = plt.gca()
+    
+    # 强制修改 Label 字体 (因为 shap 库有时会覆盖默认设置)
+    xlabel_text = feature_names[feature_i]
+    ylabel_text = f"SHAP interaction value\n({feature_names[feature_i]} and {feature_names[feature_j]})"
+    
+    ax.set_xlabel(xlabel_text, fontname='Times New Roman', fontsize=18)
+    ax.set_ylabel(ylabel_text, fontname='Times New Roman', fontsize=18)
+    
+    # 修改刻度字体
+    for label in ax.get_xticklabels() + ax.get_yticklabels():
+        label.set_fontname('Times New Roman')
+        label.set_fontsize(14)
+
+    # 修改 Colorbar (SHAP 生成的色条)
+    if len(fig.axes) > 1:
+        cbar_ax = fig.axes[1]
+        cbar_ax.set_ylabel(feature_names[feature_j], fontname='Times New Roman', fontsize=18)
+        for label in cbar_ax.get_yticklabels():
+            label.set_fontname('Times New Roman')
+            label.set_fontsize(14)
+
+    # 去掉顶部和右侧边框 (符合参考图风格)
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+
+    # 保存
+    safe_name = f"{feature_i_name}_vs_{feature_j_name}".replace("/", "_").replace("\\", "_")
+    save_file = os.path.join(base_save_path, f"Interact_{safe_name}.jpg")
+    
+    plt.savefig(save_file, dpi=1000, bbox_inches='tight')
+    plt.close()
+    print(f"  -> 图表已保存: {save_file}")
+
+# ==========================================
+# 6. 自动执行：寻找并绘制最强的前 6 组交互
+# ==========================================
+def run_analysis():
+    print("5. 寻找最强交互组合...")
+    interaction_strength = []
+    n_features = len(feature_names)
+    
+    # 遍历计算强度
+    for i in range(n_features):
+        for j in range(i + 1, n_features):
+            # 强度定义为交互值绝对值之和
+            strength = np.abs(shap_interaction_values[:, i, j]).sum()
+            interaction_strength.append({
+                'feature_i': feature_names[i],
+                'feature_j': feature_names[j],
+                'strength': strength
+            })
+    
+    # 排序取前 6
+    top_df = pd.DataFrame(interaction_strength).sort_values('strength', ascending=False).head(6)
+    print("  -> 最强交互对如下:")
+    print(top_df)
+
+    print("6. 开始批量绘图...")
+    for index, row in top_df.iterrows():
+        # 正向绘制 (A vs B)
+        plot_interaction_style_reference(row['feature_i'], row['feature_j'])
+        # 反向绘制 (B vs A) - 有时反过来看分布会不同，建议都画出来选好看的
+        plot_interaction_style_reference(row['feature_j'], row['feature_i'])
+
+if __name__ == '__main__':
+    run_analysis()
+    print(f"\n✅ 所有交互图已按照【参考图风格】保存至: {base_save_path}")
