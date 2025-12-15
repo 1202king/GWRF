@@ -1,0 +1,119 @@
+import pandas as pd
+import numpy as np
+import shap
+import matplotlib.pyplot as plt
+import os
+from sklearn.ensemble import RandomForestRegressor
+from geopy.distance import geodesic
+import warnings
+
+# 忽略警告
+warnings.filterwarnings("ignore")
+
+# ========== 1. 参数与路径配置 ==========
+# 请修改为您的实际路径
+file_path = r'C:\Users\GWRF\依赖图\biophy.xlsx'
+save_path = r'C:\Users\GWRF\SHAP_交互矩阵'
+os.makedirs(save_path, exist_ok=True)
+
+# GWRF 核心参数
+BANDWIDTH = 15000  # 带宽参数 (单位: 米)
+
+# ========== 2. 期刊级绘图风格设置 ==========
+def set_publication_style():
+    plt.rcParams.update({
+        'font.family': 'serif',
+        'font.serif': ['Times New Roman'],
+        'mathtext.fontset': 'stix',
+        'font.size': 14,
+        'axes.labelsize': 16,
+        'axes.titlesize': 16,
+        'xtick.labelsize': 14,
+        'ytick.labelsize': 14,
+        'figure.dpi': 1000,
+        'savefig.dpi': 1000,
+        'axes.unicode_minus': False
+    })
+
+set_publication_style()
+
+# ========== 3. 读取数据 ==========
+print("正在读取数据...")
+train_data = pd.read_excel(file_path)
+
+# 坐标列与目标列设置
+coord_cols = ['y_cordinat', 'x_cordinat'] 
+target_col = 'Y'
+
+# 检查坐标列
+if not all(col in train_data.columns for col in coord_cols):
+    raise ValueError(f"Excel中缺失坐标列: {coord_cols}")
+
+# 提取特征
+feature_cols = [c for c in train_data.columns if c not in [target_col] + coord_cols]
+X_train = train_data[feature_cols]
+y_train = train_data[target_col]
+coords = train_data[coord_cols]
+
+# ========== 4. GWRF 地理加权计算 ==========
+print(f"正在计算地理权重 (带宽: {BANDWIDTH}m)...")
+center_lat = coords[coord_cols[0]].mean()
+center_lon = coords[coord_cols[1]].mean()
+target_point = (center_lat, center_lon)
+
+# 计算距离
+distances = coords.apply(
+    lambda row: geodesic((row[coord_cols[0]], row[coord_cols[1]]), target_point).meters, 
+    axis=1
+)
+
+# 计算高斯权重
+sample_weights = np.exp(-0.5 * (distances / BANDWIDTH) ** 2)
+print("权重计算完成。")
+
+# ========== 5. 训练模型与计算 SHAP ==========
+print("正在训练加权随机森林 (GWRF)...")
+model = RandomForestRegressor(n_estimators=100, random_state=42)
+model.fit(X_train, y_train, sample_weight=sample_weights)
+
+print("正在计算 SHAP 交互值 (可能需要较长时间)...")
+explainer = shap.TreeExplainer(model)
+shap_interaction_values = explainer.shap_interaction_values(X_train)
+
+# ========== 6. 绘制交互矩阵图 (Matrix Plot) ==========
+def plot_interaction_summary_matrix():
+    print("正在绘制交互矩阵图...")
+    # 设置画布大小，根据特征数量适当调整高度
+    plt.figure(figsize=(10, 12))
+    
+    # 绘制 SHAP 交互摘要图
+    # 这会生成一张包含所有特征交互效应的蜂群图/矩阵图
+    shap.summary_plot(shap_interaction_values, X_train, show=False)
+    
+    # --- 期刊格式精修 ---
+    ax = plt.gca()
+    
+    # 强制修改 X 轴标签字体
+    ax.set_xlabel("SHAP interaction value", fontname='Times New Roman', fontsize=16)
+    
+    # 修改刻度字体
+    plt.yticks(fontname='Times New Roman', fontsize=14)
+    plt.xticks(fontname='Times New Roman', fontsize=14)
+    
+    # 修改 Colorbar (颜色条) 字体
+    f = plt.gcf()
+    if len(f.axes) > 1:
+        cbar_ax = f.axes[1]
+        cbar_ax.set_ylabel("Feature value", fontname='Times New Roman', fontsize=16)
+        for t in cbar_ax.get_yticklabels():
+            t.set_fontname('Times New Roman')
+
+    # 保存图片
+    save_name = os.path.join(save_path, "GWRF_Interaction_Matrix_HQ.png")
+    # bbox_inches='tight' 防止标签被裁剪
+    plt.savefig(save_name, bbox_inches='tight', dpi=1000)
+    plt.close()
+    print(f"✅ 图片已保存至: {save_name}")
+
+if __name__ == '__main__':
+    plot_interaction_summary_matrix()
